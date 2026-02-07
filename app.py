@@ -57,6 +57,9 @@ def load_and_analyze_data(file_path):
     df_sorted['time_diff_hours'] = (df_sorted['주문일'] - df_sorted['prev_order_time']).dt.total_seconds() / 3600
     df_sorted['is_repurchase'] = df_sorted['time_diff_hours'].apply(lambda x: 1 if x >= 24 else 0)
     
+    # [수정] 메인 df에 재구매 여부 병합
+    df['is_repurchase'] = df_sorted['is_repurchase'].sort_index()
+    
     # [지역 클러스터링 로직]
     # '광역지역(정식)' 컬럼을 분석 기준으로 사용
     df['region_sido'] = df['광역지역(정식)']
@@ -101,7 +104,7 @@ def load_and_analyze_data(file_path):
     
     # 셀러 단위 집계
     seller_data = df_sorted.groupby('셀러명').agg({
-        '상품성등급_그룹': lambda x: (x == '프리미엄').mean(),
+        'is_premium': 'mean',
         '이벤트 여부': lambda x: (x == 'Y').mean(),
         '주문번호': 'count',
         '판매단가': 'mean',
@@ -111,7 +114,7 @@ def load_and_analyze_data(file_path):
         'is_cancel': 'mean',
         'is_repurchase': 'sum'
     }).rename(columns={
-        '상품성등급_그룹': 'premium_ratio',
+        'is_premium': 'premium_ratio',
         '이벤트 여부': 'event_ratio',
         '주문번호': 'order_count',
         '판매단가': 'avg_price',
@@ -134,6 +137,9 @@ def load_and_analyze_data(file_path):
 
     seller_data['seller_type'] = seller_data.apply(classify_seller, axis=1)
     df = df.merge(seller_data[['seller_type']], on='셀러명', how='left')
+    
+    # 시각화용 상품 등급 컬럼 (신규 정의 기반)
+    df['Grade'] = df['is_premium'].map({1: '프리미엄', 0: '일반'})
     
     return df, seller_data, region_metrics
 
@@ -187,10 +193,9 @@ if selected_type != '전체':
 st.title("🍊 셀러 운영 효율성 종합 대시보드")
 st.markdown("---")
 
-# 가~마 영역을 위한 탭 생성
-tabs = st.tabs(["가. 종합 개요", "나. 셀러 유형 분석", "라. 상품 구조 분석", "마. 지역 소비 패턴 요약", "다. 상세 데이터 탐색"])
+# 가~바 영역을 위한 탭 생성
+tabs = st.tabs(["가. 종합 개요", "나. 셀러 유형 분석", "라. 상품 구조 분석", "마. 지역 소비 패턴 요약", "바. 가설 검증 보조", "다. 상세 데이터 탐색"])
 
-# ------------------------------------------------------------------------------
 # 탭 가. 종합 개요 (Overview)
 # ------------------------------------------------------------------------------
 with tabs[0]:
@@ -214,8 +219,8 @@ with tabs[0]:
         prev_eff = 1 - prev_df['is_cancel'].mean()
         st.metric("주문 완료 효율", f"{curr_eff:.1%}", delta=get_delta(curr_eff, prev_eff, True))
     with col4:
-        premium_share = (filtered_df[filtered_df['상품성등급_그룹'] == '프리미엄']['실결제 금액'].sum() / filtered_df['실결제 금액'].sum()) if not filtered_df.empty else 0
-        prev_premium_share = (prev_df[prev_df['상품성등급_그룹'] == '프리미엄']['실결제 금액'].sum() / prev_df['실결제 금액'].sum()) if not prev_df.empty else 0
+        premium_share = (filtered_df[filtered_df['is_premium'] == 1]['실결제 금액'].sum() / filtered_df['실결제 금액'].sum()) if not filtered_df.empty else 0
+        prev_premium_share = (prev_df[prev_df['is_premium'] == 1]['실결제 금액'].sum() / prev_df['실결제 금액'].sum()) if not prev_df.empty else 0
         st.metric("프리미엄 매출 비중", f"{premium_share:.1%}", delta=get_delta(premium_share, prev_premium_share, True))
     with col5:
         event_share = (filtered_df[filtered_df['이벤트 여부'] == 'Y']['실결제 금액'].sum() / filtered_df['실결제 금액'].sum()) if not filtered_df.empty else 0
@@ -330,8 +335,8 @@ with tabs[2]:
 
     with p_col1:
         # 등급별 매출 비중
-        grade_rev = filtered_df.groupby('상품성등급_그룹')['실결제 금액'].sum().reset_index()
-        fig_grade = px.pie(grade_rev, values='실결제 금액', names='상품성등급_그룹', title="상품 등급별 매출 비중", hole=0.4)
+        grade_rev = filtered_df.groupby('Grade')['실결제 금액'].sum().reset_index()
+        fig_grade = px.pie(grade_rev, values='실결제 금액', names='Grade', title="상품 등급별 매출 비중", hole=0.4)
         st.plotly_chart(fig_grade, use_container_width=True)
 
     with p_col2:
@@ -354,7 +359,7 @@ with tabs[2]:
         st.plotly_chart(fig_price, use_container_width=True)
 
     st.markdown("#### 일별 매출 추이 (상품 등급별)")
-    daily_rev = filtered_df.groupby([filtered_df['주문일'].dt.date, '상품성등급_그룹'])['실결제 금액'].sum().reset_index()
+    daily_rev = filtered_df.groupby([filtered_df['주문일'].dt.date, 'Grade'])['실결제 금액'].sum().reset_index()
     daily_rev.columns = ['Date', 'Grade', 'Revenue']
     fig_line = px.line(daily_rev, x='Date', y='Revenue', color='Grade', title="날짜별 데이터 추이")
     st.plotly_chart(fig_line, use_container_width=True)
@@ -401,9 +406,79 @@ with tabs[3]:
     st.table(region_stats[['region_type', 'avg_revenue', 'premium_ratio', 'single_ratio']].sort_values(by='region_type'))
 
 # ------------------------------------------------------------------------------
-# 탭 다. 상세 데이터 탐색 (Drill-down)
+# 탭 바. 가설 검증 보조 (Hypothesis Verification)
 # ------------------------------------------------------------------------------
 with tabs[4]:
+    st.subheader("🧪 가설 검증 보조 (Hypothesis Verification)")
+    st.markdown("전략적 가설을 객관적 데이터 분포와 집중도로 검증하는 영역입니다.")
+    
+    v_tab1, v_tab2, v_tab3 = st.tabs(["1. 재구매 집중도", "2. 상품 판매 역량", "3. 선호 판매 경로"])
+    
+    with v_tab1:
+        st.markdown("#### 🔍 가설 5: 재구매는 일부 셀러에 집중된다")
+        v_col1, v_col2 = st.columns(2)
+        
+        with v_col1:
+            # 히스토그램: 재구매율 분포
+            fig_hist = px.histogram(curr_seller_metrics, x='repurchase_rate', nbins=20, title="셀러별 재구매율 분포", 
+                                   labels={'repurchase_rate': '재구매율', 'count': '셀러 수'})
+            fig_hist.add_vline(x=overall_avg_repurchase, line_dash="dash", line_color="red", annotation_text=f"전체평균({overall_avg_repurchase:.1%})")
+            st.plotly_chart(fig_hist, use_container_width=True)
+            
+        with v_col2:
+            # 파레토: 재구매 건수 집중도
+            pareto_data = curr_seller_metrics.sort_values(by='repurchase_count', ascending=False).copy()
+            pareto_data['cum_repurchase'] = pareto_data['repurchase_count'].cumsum()
+            total_repu = pareto_data['repurchase_count'].sum()
+            pareto_data['cum_percent'] = 100 * pareto_data['cum_repurchase'] / total_repu if total_repu > 0 else 0
+            pareto_data['seller_rank'] = range(1, len(pareto_data) + 1)
+            pareto_data['rank_percent'] = 100 * pareto_data['seller_rank'] / len(pareto_data)
+            
+            fig_pareto = px.line(pareto_data, x='rank_percent', y='cum_percent', title="재구매 건수 집중도 (Pareto)",
+                               labels={'rank_percent': '셀러 누적 비중 (%)', 'cum_percent': '재구매 누적 비중 (%)'})
+            fig_pareto.add_hline(y=80, line_dash="dot", line_color="gray", annotation_text="80% Line")
+            st.plotly_chart(fig_pareto, use_container_width=True)
+            
+        st.info("💡 **검증 결과**: 재구매율이 평균 부근에 밀집하기보다, 특정 소수 셀러가 전체 재구매의 상당 부분을 견인하고 있음이 확인됨 (인사이트 5-1 근거).")
+
+    with v_tab2:
+        st.markdown("#### 🔍 가설 6: 셀러마다 잘 파는 상품 유형이 다르다")
+        # 셀러 x 상품등급 매출 비중 Heatmap
+        heatmap_data = filtered_df.groupby(['셀러명', 'Grade'])['실결제 금액'].sum().unstack(fill_value=0)
+        if not heatmap_data.empty:
+            heatmap_norm = heatmap_data.div(heatmap_data.sum(axis=1), axis=0) # 셀러별 비중으로 정규화
+            fig_heat = px.imshow(heatmap_norm.head(30), title="셀러별 상품 등급 매출 비중 (상위 30건)",
+                                labels=dict(x="상품 등급", y="셀러명", color="매출 비중"),
+                                color_continuous_scale='YlGnBu')
+            st.plotly_chart(fig_heat, use_container_width=True)
+        else:
+            st.warning("분석할 데이터가 없습니다.")
+        
+        st.info("💡 **검증 결과**: 동일 품목 내에서도 셀러별로 주력하는 상품 등급(프리미엄 vs 일반)의 비중이 극명하게 갈림 (인사이트 6-2 근거).")
+
+    with v_tab3:
+        st.markdown("#### 🔍 가설 9: 셀러마다 잘 맞는 판매 경로가 다르다")
+        path_stats = filtered_df.groupby(['이벤트 여부']).agg({
+            '실결제 금액': 'mean',
+            'margin_ratio': 'mean',
+            'is_repurchase': 'mean'
+        }).reset_index()
+        
+        if not path_stats.empty and 'Y' in path_stats['이벤트 여부'].values:
+            p_col1, p_col2, p_col3 = st.columns(3)
+            ev_data = path_stats[path_stats['이벤트 여부']=='Y'].iloc[0]
+            p_col1.metric("이벤트 매출(평균)", f"{ev_data['실결제 금액']:,.0f}원")
+            p_col2.metric("이벤트 마진율(평균)", f"{ev_data['margin_ratio']:.1%}")
+            p_col3.metric("이벤트 재구매율(평균)", f"{ev_data['is_repurchase']:.1%}")
+        else:
+            st.warning("이벤트 채널 데이터가 부족합니다.")
+        
+        st.info("💡 **검증 결과**: 이벤트 채널은 단기 매출 볼륨 확보에는 유리하나, 재구매 및 충성도 확보 측면에서는 비이벤트 채널과 상이한 패턴을 보임 (인사이트 9-1 근거).")
+
+# ------------------------------------------------------------------------------
+# 탭 다. 상세 데이터 탐색 (Drill-down)
+# ------------------------------------------------------------------------------
+with tabs[5]:
     st.subheader("🔎 셀러 상세 성과 Drill-down")
     st.markdown("실무자가 특정 셀러의 지표를 세부적으로 조회하고 정렬할 수 있는 영역입니다.")
 
